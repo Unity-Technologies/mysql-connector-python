@@ -854,7 +854,7 @@ class MySQLCursor(CursorBase):
         """
         try:
             return self._executed.strip().decode('utf8')
-        except AttributeError:
+        except (AttributeError, UnicodeDecodeError):
             return self._executed.strip()
 
     @property
