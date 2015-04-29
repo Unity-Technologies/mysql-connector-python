@@ -2,7 +2,12 @@
 
 # New file added for Django 1.7
 
-from django.db.backends.schema import BaseDatabaseSchemaEditor
+import django
+
+if django.VERSION < (1, 8):
+    from django.db.backends.schema import BaseDatabaseSchemaEditor
+else:
+    from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.models import NOT_PROVIDED
 
 

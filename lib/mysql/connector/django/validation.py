@@ -1,7 +1,10 @@
 # MySQL Connector/Python - MySQL driver written in Python.
 
 import django
-from django.db.backends import BaseDatabaseValidation
+if django.VERSION < (1, 8):
+    from django.db.backends import BaseDatabaseValidation
+else:
+    from django.db.backends.base.validation import BaseDatabaseValidation
 
 if django.VERSION < (1, 7):
     from django.db import models

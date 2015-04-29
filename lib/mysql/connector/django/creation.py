@@ -2,7 +2,10 @@
 
 import django
 from django.db import models
-from django.db.backends.creation import BaseDatabaseCreation
+if django.VERSION < (1, 8):
+    from django.db.backends.creation import BaseDatabaseCreation
+else:
+    from django.db.backends.base.creation import BaseDatabaseCreation
 
 if django.VERSION < (1, 7):
     from django.db.backends.util import truncate_name

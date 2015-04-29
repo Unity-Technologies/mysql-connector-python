@@ -3,10 +3,16 @@
 
 import re
 import django
-from django.db.backends import BaseDatabaseIntrospection
+if django.VERSION < (1, 8):
+    from django.db.backends import BaseDatabaseIntrospection
+else:
+    from django.db.backends.base.introspection import BaseDatabaseIntrospection
 
 if django.VERSION >= (1, 6):
-    from django.db.backends import FieldInfo
+    if django.VERSION < (1, 8):
+        from django.db.backends import FieldInfo
+    else:
+        from django.db.backends.base.introspection import FieldInfo, TableInfo
     from django.utils.encoding import force_text
     if django.VERSION >= (1, 7):
         from django.utils.datastructures import OrderedSet
@@ -42,8 +48,9 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     def get_table_list(self, cursor):
         "Returns a list of table names in the current database."
-        cursor.execute("SHOW TABLES")
-        return [row[0] for row in cursor.fetchall()]
+        cursor.execute("SHOW FULL TABLES")
+        return [TableInfo(row[0], {'BASE TABLE': 't', 'VIEW': 'v'}.get(row[1]))
+                for row in cursor.fetchall()]
 
     def get_table_description(self, cursor, table_name):
         """
