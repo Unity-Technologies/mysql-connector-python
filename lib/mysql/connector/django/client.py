@@ -1,10 +1,13 @@
 # MySQL Connector/Python - MySQL driver written in Python.
 
-
+import django
 import os
 import sys
 
-from django.db.backends import BaseDatabaseClient
+if django.VERSION < (1,8):
+    from django.db.backends import BaseDatabaseClient
+else:
+    from django.db.backends.base.client import BaseDatabaseClient
 
 
 class DatabaseClient(BaseDatabaseClient):

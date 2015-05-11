@@ -47,8 +47,13 @@ if django.VERSION < (1, 7):
     from django.db.backends import util
 else:
     from django.db.backends import utils as backend_utils
-from django.db.backends import (BaseDatabaseFeatures, BaseDatabaseOperations,
+if django.VERSION < (1,8):
+    from django.db.backends import (BaseDatabaseFeatures, BaseDatabaseOperations,
                                 BaseDatabaseWrapper)
+else:
+    from django.db.backends.base.features import BaseDatabaseFeatures
+    from django.db.backends.base.operations import BaseDatabaseOperations
+    from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.signals import connection_created
 from django.utils import (six, timezone, dateparse)
 from django.conf import settings
@@ -495,6 +500,42 @@ class DatabaseOperations(BaseDatabaseOperations):
 
 class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = 'mysql'
+
+    _data_types = {
+        'AutoField': 'integer AUTO_INCREMENT',
+        'BinaryField': 'longblob',
+        'BooleanField': 'bool',
+        'CharField': 'varchar(%(max_length)s)',
+        'CommaSeparatedIntegerField': 'varchar(%(max_length)s)',
+        'DateField': 'date',
+        'DateTimeField': 'datetime',
+        'DecimalField': 'numeric(%(max_digits)s, %(decimal_places)s)',
+        'DurationField': 'bigint',
+        'FileField': 'varchar(%(max_length)s)',
+        'FilePathField': 'varchar(%(max_length)s)',
+        'FloatField': 'double precision',
+        'IntegerField': 'integer',
+        'BigIntegerField': 'bigint',
+        'IPAddressField': 'char(15)',
+        'GenericIPAddressField': 'char(39)',
+        'NullBooleanField': 'bool',
+        'OneToOneField': 'integer',
+        'PositiveIntegerField': 'integer UNSIGNED',
+        'PositiveSmallIntegerField': 'smallint UNSIGNED',
+        'SlugField': 'varchar(%(max_length)s)',
+        'SmallIntegerField': 'smallint',
+        'TextField': 'longtext',
+        'TimeField': 'time',
+        'UUIDField': 'char(32)',
+    }
+
+    @cached_property
+    def data_types(self):
+        if self.features.supports_microsecond_precision:
+            return dict(self._data_types, DateTimeField='datetime(6)', TimeField='time(6)')
+        else:
+            return self._data_types
+
     operators = {
         'exact': '= %s',
         'iexact': 'LIKE %s',
