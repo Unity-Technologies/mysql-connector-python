@@ -1,5 +1,5 @@
 # MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2009, 2014, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2009, 2015, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -98,7 +98,7 @@ def custom_error_exception(error=None, exception=None):
 
     return _CUSTOM_ERROR_EXCEPTIONS
 
-def get_mysql_exception(errno, msg, sqlstate=None):
+def get_mysql_exception(errno, msg=None, sqlstate=None):
     """Get the exception matching the MySQL error
 
     This function will return an exception based on the SQLState. The given
@@ -143,8 +143,11 @@ def get_exception(packet):
     """
     errno = errmsg = None
 
-    if packet[4] != 255:
-        raise ValueError("Packet is not an error packet")
+    try:
+        if packet[4] != 255:
+            raise ValueError("Packet is not an error packet")
+    except IndexError as err:
+        return InterfaceError("Failed getting Error information (%r)" % err)
 
     sqlstate = None
     try:
@@ -293,4 +296,9 @@ _SQLSTATE_CLASS_EXCEPTION = {
 _ERROR_EXCEPTIONS = {
     1243: ProgrammingError,
     1210: ProgrammingError,
+    2002: InterfaceError,
+    2013: OperationalError,
+    2049: NotSupportedError,
+    2055: OperationalError,
+    2061: InterfaceError,
 }

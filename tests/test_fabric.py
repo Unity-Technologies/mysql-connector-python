@@ -121,7 +121,10 @@ class ConnectionModuleTests(tests.MySQLConnectorTests):
         self.assertEqual(error_codes, connection.RESET_CACHE_ON_ERROR)
 
         modvars = {
-            'MYSQL_FABRIC_PORT': 32274,
+            'MYSQL_FABRIC_PORT': {
+                'xmlrpc': 32274, 'mysql': 32275
+            },
+            'DEFAULT_FABRIC_PROTOCOL': 'xmlrpc',
             'FABRICS': {},
             '_CNX_ATTEMPT_DELAY': 1,
             '_CNX_ATTEMPT_MAX': 3,
@@ -535,15 +538,9 @@ class FabricShardingTests(tests.MySQLConnectorTests):
             rows = cur.fetchall()
             self.assertEqual(rows, emp_exp_range_string[str_key])
 
-        if not PY2:
-            self.assertRaises(TypeError, self.cnx.set_property,
-                              tables=tables, key=b'not unicode str',
-                              mode=fabric.MODE_READONLY)
-        else:
-            self.cnx.set_property(tables=tables,
-                                  key=b'not unicode str',
-                                  mode=fabric.MODE_READONLY)
-            self.assertRaises(ValueError, self.cnx.cursor)
+        self.cnx.set_property(tables=tables,
+                              key=b'not unicode str', mode=fabric.MODE_READONLY)
+        self.assertRaises(ValueError, self.cnx.cursor)
 
         self.cnx.set_property(tables=tables,
                               key=12345, mode=fabric.MODE_READONLY)
@@ -610,7 +607,6 @@ class FabricShardingTests(tests.MySQLConnectorTests):
         self.assertTrue(isinstance(cnx._mysql_cnx, PooledMySQLConnection))
 
         data = self.emp_data[1985]
-
         for emp in data:
             cnx.set_property(tables=tables,
                              key=emp[0],
@@ -624,8 +620,6 @@ class FabricShardingTests(tests.MySQLConnectorTests):
                     mysqlserver.host, mysqlserver.port, config['user'],
                     config['database'])
             )
-
-        mysql.connector._CONNECTION_POOLS = {}
 
     def test_range_hash(self):
         self.assertTrue(self._check_table(

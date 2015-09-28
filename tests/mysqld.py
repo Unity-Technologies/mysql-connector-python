@@ -1,5 +1,5 @@
 # MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2009, 2014, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2009, 2015, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -58,12 +58,17 @@ LOGGER = logging.getLogger(tests.LOGGER_NAME)
 DEVNULL = open(os.devnull, 'w')
 
 
-# MySQL Server executable used
+# MySQL Server executable name
 if os.name == 'nt':
     EXEC_MYSQLD = 'mysqld.exe'
 else:
     EXEC_MYSQLD = 'mysqld'
 
+# MySQL client executable name
+if os.name == 'nt':
+    EXEC_MYSQL = 'mysql.exe'
+else:
+    EXEC_MYSQL = 'mysql'
 
 def _convert_forward_slash(path):
     """Convert forward slashes with backslashes
@@ -176,6 +181,7 @@ class MySQLServerBase(object):
 
         # Locate mysqld, mysql binaries
         LOGGER.info("Locating mysql binaries (could take a while)")
+        files_to_find = [EXEC_MYSQL, EXEC_MYSQLD]
         for root, dirs, files in os.walk(self._basedir):
             if self._sbindir:
                 break
@@ -183,7 +189,15 @@ class MySQLServerBase(object):
                 if (afile == EXEC_MYSQLD and
                         os.access(os.path.join(root, afile), 0)):
                     self._sbindir = root
+                    files_to_find.remove(EXEC_MYSQLD)
+                elif (afile == EXEC_MYSQL and
+                        os.access(os.path.join(root, afile), 0)):
+                    self._bindir = root
+                    files_to_find.remove(EXEC_MYSQL)
+
+                if not files_to_find:
                     break
+
 
         if not self._sbindir:
             raise MySQLBootstrapError(
@@ -310,6 +324,21 @@ class MySQLServerBase(object):
 
         return True
 
+    def get_exec(self, exec_name):
+        """Find executable in the MySQL directories
+
+        Returns the the full path to the executable named exec_name or
+        None when the executable was not found.
+
+        Return str or None.
+        """
+        for location in [self._bindir, self._sbindir]:
+            exec_path = os.path.join(location, exec_name)
+            if os.access(exec_path, 0):
+                return exec_path
+
+        return None
+
 
 class MySQLServer(MySQLServerBase):
     """Class for managing a MySQL server"""
@@ -381,6 +410,7 @@ class MySQLServer(MySQLServerBase):
             '--default-storage-engine=myisam',
             '--net_buffer_length=16K',
             '--tmpdir=%s' % self._tmpdir,
+            '--innodb_log_file_size=1Gb',
         ]
         if self._version[0:2] < (5, 5):
             cmd.append('--language={0}/english'.format(self._lc_messages_dir))
@@ -418,37 +448,44 @@ class MySQLServer(MySQLServerBase):
         extra_sql = [
             "CREATE DATABASE myconnpy;"
         ]
+        insert = (
+            "INSERT INTO mysql.user VALUES ('localhost','root'{0},"
+            "'Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y',"
+            "'Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y',"
+            "'Y','Y','Y','Y','Y','','','','',0,0,0,0,"
+            "@@default_authentication_plugin,'','N',"
+            "CURRENT_TIMESTAMP,NULL{1});"
+        )
+        # MySQL 5.7.5+ creates no user while bootstrapping
+        if self._version[0:3] >= (5, 7, 6):
+            # MySQL 5.7.6+ have extra account_locked col and no password col
+            extra_sql.append(insert.format("", ",'N'"))
+        elif self._version[0:3] >= (5, 7, 5):
+            extra_sql.append(insert.format(",''", ""))
 
-        if self._version[0:3] >= (5, 7, 5):
-            # MySQL 5.7.5 creates no user while bootstrapping
-            extra_sql.append(
-                "INSERT INTO mysql.user VALUES ('localhost','root','',"
-                "'Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y',"
-                "'Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y','Y',"
-                "'Y','Y','Y','Y','Y','','','','',0,0,0,0,"
-                "@@default_authentication_plugin,'','N',"
-                "CURRENT_TIMESTAMP,NULL);"
-            )
-        if self._version[0:3] >= (5, 7, 4):
-            # MySQL 5.7.4 only creates root@localhost
-            extra_sql.append(
-                "INSERT INTO mysql.user SELECT '127.0.0.1', `User`, `Password`,"
-                " `Select_priv`, `Insert_priv`, `Update_priv`, `Delete_priv`,"
-                " `Create_priv`, `Drop_priv`, `Reload_priv`, `Shutdown_priv`,"
-                " `Process_priv`, `File_priv`, `Grant_priv`, `References_priv`,"
-                " `Index_priv`, `Alter_priv`, `Show_db_priv`, `Super_priv`,"
-                " `Create_tmp_table_priv`, `Lock_tables_priv`, `Execute_priv`,"
-                " `Repl_slave_priv`, `Repl_client_priv`, `Create_view_priv`,"
-                " `Show_view_priv`, `Create_routine_priv`, "
-                "`Alter_routine_priv`,"
-                " `Create_user_priv`, `Event_priv`, `Trigger_priv`, "
-                "`Create_tablespace_priv`, `ssl_type`, `ssl_cipher`,"
-                "`x509_issuer`, `x509_subject`, `max_questions`, `max_updates`,"
-                "`max_connections`, `max_user_connections`, `plugin`,"
-                "`authentication_string`, `password_expired`,"
-                "`password_last_changed`, `password_lifetime` FROM mysql.user "
-                "WHERE `user` = 'root' and `host` = 'localhost';"
-            )
+        insert_localhost = (
+            "INSERT INTO mysql.user SELECT '127.0.0.1', `User`{0},"
+            " `Select_priv`, `Insert_priv`, `Update_priv`, `Delete_priv`,"
+            " `Create_priv`, `Drop_priv`, `Reload_priv`, `Shutdown_priv`,"
+            " `Process_priv`, `File_priv`, `Grant_priv`, `References_priv`,"
+            " `Index_priv`, `Alter_priv`, `Show_db_priv`, `Super_priv`,"
+            " `Create_tmp_table_priv`, `Lock_tables_priv`, `Execute_priv`,"
+            " `Repl_slave_priv`, `Repl_client_priv`, `Create_view_priv`,"
+            " `Show_view_priv`, `Create_routine_priv`, "
+            "`Alter_routine_priv`,"
+            " `Create_user_priv`, `Event_priv`, `Trigger_priv`, "
+            "`Create_tablespace_priv`, `ssl_type`, `ssl_cipher`,"
+            "`x509_issuer`, `x509_subject`, `max_questions`, `max_updates`,"
+            "`max_connections`, `max_user_connections`, `plugin`,"
+            "`authentication_string`, `password_expired`,"
+            "`password_last_changed`, `password_lifetime`{1} FROM mysql.user "
+            "WHERE `user` = 'root' and `host` = 'localhost';"
+        )
+        # MySQL 5.7.4+ only creates root@localhost
+        if self._version[0:3] >= (5, 7, 6):
+            extra_sql.append(insert_localhost.format("", ",`account_locked`"))
+        elif self._version[0:3] >= (5, 7, 4):
+            extra_sql.append(insert_localhost.format(",`Password`", ""))
 
         bootstrap_log = os.path.join(self._topdir, 'bootstrap.log')
         try:
@@ -529,7 +566,10 @@ class MySQLServer(MySQLServerBase):
             fp.write(self._cnf.format(**options))
             fp.close()
             self._start_server()
-            time.sleep(5)
+            for i in range(10):
+                if self.check_running():
+                    break
+                time.sleep(5)
         except MySQLServerError as err:
             if self._debug is True:
                 raise
@@ -541,9 +581,10 @@ class MySQLServer(MySQLServerBase):
             pid = get_pid(self._pid_file)
             if not pid:
                 LOGGER.error("Failed getting PID of MySQL server "
-                             "'{name}'".format(name=self._name))
+                             "'{name}' (file {pid_file}".format(
+                    name=self._name, pid_file=self._pid_file))
                 sys.exit(1)
-            LOGGER.info("MySQL server started '{name}' "
+            LOGGER.debug("MySQL server started '{name}' "
                         "(pid={pid})".format(pid=pid, name=self._name))
 
     def stop(self):
@@ -576,7 +617,7 @@ class MySQLServer(MySQLServerBase):
             time.sleep(3)
 
         if self.check_running(pid):
-            LOGGER.info("MySQL server stopped '{name}' "
+            LOGGER.debug("MySQL server stopped '{name}' "
                         "(pid={pid})".format(pid=pid, name=self._name))
             return True
 

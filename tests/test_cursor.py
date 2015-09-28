@@ -1,4 +1,5 @@
-# Copyright (c) 2009, 2014, Oracle and/or its affiliates. All rights reserved.
+# -*- coding: utf-8 -*-
+# Copyright (c) 2009, 2015, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -561,7 +562,7 @@ class MySQLCursorTests(tests.TestsCursor):
                          self.cur.fetchall(), "Insert test failed")
 
         data = {'id': 2}
-        stmt = "SELECT * FROM {0} WHERE col1 <= %(id)s".format(tbl)
+        stmt = "SELECT col1,col2 FROM {0} WHERE col1 <= %(id)s".format(tbl)
         self.cur.execute(stmt, data)
         self.assertEqual([(1, '100')], self.cur.fetchall())
 
@@ -915,7 +916,7 @@ class MySQLCursorTests(tests.TestsCursor):
         stmt = "SELECT VERSION(),USER(),CURRENT_TIME(),NOW(),SHA1('myconnpy')"
         self.cur.execute(stmt)
         self.cur.fetchone()
-        self.assertEqual("MySQLCursor: {0}..".format(stmt[:30]),
+        self.assertEqual("MySQLCursor: {0}..".format(stmt[:40]),
                          self.cur.__str__())
         self.cur.close()
 
@@ -944,6 +945,29 @@ class MySQLCursorTests(tests.TestsCursor):
         self.assertFalse(self.cur.with_rows)
         self.cur._description = ('ham', 'spam')
         self.assertTrue(self.cur.with_rows)
+
+    def test_unicode(self):
+        self.cnx = connection.MySQLConnection(**tests.get_mysql_config())
+        self.cur = self.cnx.cursor()
+        stmt = "DROP TABLE IF EXISTS test_unicode"
+        self.cur.execute(stmt)
+
+        stmt = (
+            "CREATE TABLE test_unicode(`aé` INTEGER AUTO_INCREMENT, "
+            "`測試` INTEGER, PRIMARY KEY (`aé`))ENGINE=InnoDB"
+        )
+        self.cur.execute(stmt)
+        stmt = "INSERT INTO test_unicode(`aé`, `測試`) VALUES (%(aé)s, %(測試)s)"
+        params = {'aé': 1, '測試': 2}
+        self.cur.execute(stmt, params)
+
+        stmt = "SELECT * FROM test_unicode"
+        self.cur.execute(stmt)
+        exp = [(1, 2)]
+        self.assertEqual(exp, self.cur.fetchall())
+
+        stmt = "DROP TABLE IF EXISTS test_unicode"
+        self.cur.execute(stmt)
 
 
 class MySQLCursorBufferedTests(tests.TestsCursor):
