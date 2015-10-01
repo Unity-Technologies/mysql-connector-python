@@ -1,5 +1,5 @@
 # MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2014, 2015, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -25,37 +25,48 @@
 """
 
 import datetime
+import unittest
 import sys
 import unittest
 
 import tests
 
 # Load 3rd party _after_ loading tests
-from django.conf import settings
+try:
+    from django.conf import settings
+except ImportError:
+    DJANGO_AVAILABLE = False
+else:
+    DJANGO_AVAILABLE = True
 
 # Have to setup Django before loading anything else
-settings.configure()
-DBCONFIG = tests.get_mysql_config()
+if DJANGO_AVAILABLE:
+    try:
+        settings.configure()
+    except RuntimeError as exc:
+        if not 'already configured' in str(exc):
+            raise
+    DBCONFIG = tests.get_mysql_config()
 
-settings.DATABASES = {
-    'default': {
-        'ENGINE': 'mysql.connector.django',
-        'NAME': DBCONFIG['database'],
-        'USER': 'root',
-        'PASSWORD': '',
-        'HOST': DBCONFIG['host'],
-        'PORT': DBCONFIG['port'],
-        'TEST_CHARSET': 'utf8',
-        'TEST_COLLATION': 'utf8_general_ci',
-        'CONN_MAX_AGE': 0,
-        'AUTOCOMMIT': True,
-    },
-}
-settings.SECRET_KEY = "django_tests_secret_key"
-settings.TIME_ZONE = 'UTC'
-settings.USE_TZ = False
-settings.SOUTH_TESTS_MIGRATE = False
-settings.DEBUG = False
+    settings.DATABASES = {
+        'default': {
+            'ENGINE': 'mysql.connector.django',
+            'NAME': DBCONFIG['database'],
+            'USER': 'root',
+            'PASSWORD': '',
+            'HOST': DBCONFIG['host'],
+            'PORT': DBCONFIG['port'],
+            'TEST_CHARSET': 'utf8',
+            'TEST_COLLATION': 'utf8_general_ci',
+            'CONN_MAX_AGE': 0,
+            'AUTOCOMMIT': True,
+        },
+    }
+    settings.SECRET_KEY = "django_tests_secret_key"
+    settings.TIME_ZONE = 'UTC'
+    settings.USE_TZ = False
+    settings.SOUTH_TESTS_MIGRATE = False
+    settings.DEBUG = False
 
 TABLES = {}
 TABLES['django_t1'] = """
@@ -82,16 +93,22 @@ FOREIGN KEY (id_t1) REFERENCES django_t1(id) ON DELETE CASCADE
 # Have to load django.db to make importing db backend work for Django < 1.6
 import django.db  # pylint: disable=W0611
 if tests.DJANGO_VERSION >= (1, 6):
-    from django.db.backends import FieldInfo
+    if tests.DJANGO_VERSION >= (1, 8):
+        from django.db.backends.base.introspection import FieldInfo
+    else:
+        from django.db.backends import FieldInfo
 from django.db.backends.signals import connection_created
 from django.utils.safestring import SafeBytes, SafeText
 
 import mysql.connector
-from mysql.connector.django.base import (DatabaseWrapper, DatabaseOperations,
-                                         DjangoMySQLConverter)
-from mysql.connector.django.introspection import DatabaseIntrospection
+
+if DJANGO_AVAILABLE:
+    from mysql.connector.django.base import (
+        DatabaseWrapper, DatabaseOperations, DjangoMySQLConverter)
+    from mysql.connector.django.introspection import DatabaseIntrospection
 
 
+@unittest.skipIf(not DJANGO_AVAILABLE, "Django not available")
 class DjangoIntrospection(tests.MySQLConnectorTests):
 
     """Test the Django introspection module"""
@@ -188,6 +205,7 @@ class DjangoIntrospection(tests.MySQLConnectorTests):
         self.assertEqual('id', res)
 
 
+@unittest.skipIf(not DJANGO_AVAILABLE, "Django not available")
 class DjangoDatabaseWrapper(tests.MySQLConnectorTests):
 
     """Test the Django base.DatabaseWrapper class"""
@@ -209,6 +227,8 @@ class DjangoDatabaseWrapper(tests.MySQLConnectorTests):
         value = datetime.time(2, 5, 7)
         exp = self.conn.converter._time_to_mysql(value)
         self.assertEqual(exp, self.cnx.ops.value_to_db_time(value))
+
+
 
     def test_signal(self):
         from django.db import connection

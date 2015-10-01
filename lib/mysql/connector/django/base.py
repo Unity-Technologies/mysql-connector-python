@@ -17,14 +17,17 @@ Requires and comes with MySQL Connector/Python v1.1 and later:
 
 from __future__ import unicode_literals
 
+from datetime import datetime
 import sys
+import warnings
 
 import django
 from django.utils.functional import cached_property
 
 try:
     import mysql.connector
-    from mysql.connector.conversion import MySQLConverter
+    from mysql.connector.conversion import MySQLConverter, MySQLConverterBase
+    from mysql.connector.catch23 import PY2
 except ImportError as err:
     from django.core.exceptions import ImproperlyConfigured
     raise ImproperlyConfigured(
@@ -35,6 +38,13 @@ try:
 except AttributeError:
     from mysql.connector.version import VERSION
     version = VERSION[0:3]
+
+try:
+    from _mysql_connector import datetime_to_mysql, time_to_mysql
+except ImportError:
+    HAVE_CEXT = False
+else:
+    HAVE_CEXT = True
 
 if version < (1, 1):
     from django.core.exceptions import ImproperlyConfigured
@@ -47,13 +57,11 @@ if django.VERSION < (1, 7):
     from django.db.backends import util
 else:
     from django.db.backends import utils as backend_utils
-if django.VERSION < (1,8):
-    from django.db.backends import (BaseDatabaseFeatures, BaseDatabaseOperations,
-                                BaseDatabaseWrapper)
-else:
-    from django.db.backends.base.features import BaseDatabaseFeatures
-    from django.db.backends.base.operations import BaseDatabaseOperations
+if django.VERSION >= (1, 8):
     from django.db.backends.base.base import BaseDatabaseWrapper
+else:
+    from django.db.backends import BaseDatabaseWrapper
+
 from django.db.backends.signals import connection_created
 from django.utils import (six, timezone, dateparse)
 from django.conf import settings
@@ -62,22 +70,35 @@ from mysql.connector.django.client import DatabaseClient
 from mysql.connector.django.creation import DatabaseCreation
 from mysql.connector.django.introspection import DatabaseIntrospection
 from mysql.connector.django.validation import DatabaseValidation
+from mysql.connector.django.features import DatabaseFeatures
+from mysql.connector.django.operations import DatabaseOperations
 if django.VERSION >= (1, 7):
     from mysql.connector.django.schema import DatabaseSchemaEditor
 
-try:
-    import pytz
-    HAVE_PYTZ = True
-except ImportError:
-    HAVE_PYTZ = False
 
 DatabaseError = mysql.connector.DatabaseError
 IntegrityError = mysql.connector.IntegrityError
 NotSupportedError = mysql.connector.NotSupportedError
 
 
+def adapt_datetime_with_timezone_support(value):
+    # Equivalent to DateTimeField.get_db_prep_value. Used only by raw SQL.
+    if settings.USE_TZ:
+        if timezone.is_naive(value):
+            warnings.warn("MySQL received a naive datetime (%s)"
+                          " while time zone support is active." % value,
+                          RuntimeWarning)
+            default_timezone = timezone.get_default_timezone()
+            value = timezone.make_aware(value, default_timezone)
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    if HAVE_CEXT:
+        return datetime_to_mysql(value)
+    else:
+        return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
 class DjangoMySQLConverter(MySQLConverter):
-    """Custom converter for Django"""
+    """Custom converter for Django for MySQLConnection"""
     def _TIME_to_python(self, value, dsc=None):
         """Return MySQL TIME data type as datetime.time()
 
@@ -104,10 +125,38 @@ class DjangoMySQLConverter(MySQLConverter):
         return dt
 
     def _safetext_to_mysql(self, value):
-        return self._str_to_mysql(value)
+        if PY2:
+            return self._unicode_to_mysql(value)
+        else:
+            return self._str_to_mysql(value)
 
     def _safebytes_to_mysql(self, value):
         return self._bytes_to_mysql(value)
+
+
+class DjangoCMySQLConverter(MySQLConverterBase):
+    """Custom converter for Django for CMySQLConnection"""
+    def _TIME_to_python(self, value, dsc=None):
+        """Return MySQL TIME data type as datetime.time()
+
+        Returns datetime.time()
+        """
+        return dateparse.parse_time(str(value))
+
+    def _DATETIME_to_python(self, value, dsc=None):
+        """Connector/Python always returns naive datetime.datetime
+
+        Connector/Python always returns naive timestamps since MySQL has
+        no time zone support. Since Django needs non-naive, we need to add
+        the UTC time zone.
+
+        Returns datetime.datetime()
+        """
+        if not value:
+            return None
+        if settings.USE_TZ and timezone.is_naive(value):
+            value = value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class CursorWrapper(object):
@@ -117,6 +166,8 @@ class CursorWrapper(object):
     Connector/Python. If buffered option is True in those options,
     MySQLCursorBuffered will be used.
     """
+    codes_for_integrityerror = (1048,)
+
     def __init__(self, cursor):
         self.cursor = cursor
 
@@ -131,11 +182,37 @@ class CursorWrapper(object):
             six.reraise(utils.IntegrityError,
                         utils.IntegrityError(err.msg), sys.exc_info()[2])
         except mysql.connector.OperationalError as err:
-            six.reraise(utils.DatabaseError,
-                        utils.DatabaseError(err.msg), sys.exc_info()[2])
+            # Map some error codes to IntegrityError, since they seem to be
+            # misclassified and Django would prefer the more logical place.
+            if err.args[0] in self.codes_for_integrityerror:
+                six.reraise(utils.IntegrityError,
+                            utils.IntegrityError(err.msg), sys.exc_info()[2])
+            else:
+                six.reraise(utils.DatabaseError,
+                            utils.DatabaseError(err.msg), sys.exc_info()[2])
         except mysql.connector.DatabaseError as err:
             six.reraise(utils.DatabaseError,
                         utils.DatabaseError(err.msg), sys.exc_info()[2])
+
+    def _adapt_execute_args_dict(self, args):
+        if not args:
+            return args
+        new_args = dict(args)
+        for key, value in args.items():
+            if isinstance(value, datetime):
+                new_args[key] = adapt_datetime_with_timezone_support(value)
+
+        return new_args
+
+    def _adapt_execute_args(self, args):
+        if not args:
+            return args
+        new_args = list(args)
+        for i, arg in enumerate(args):
+            if isinstance(arg, datetime):
+                new_args[i] = adapt_datetime_with_timezone_support(arg)
+
+        return tuple(new_args)
 
     def execute(self, query, args=None):
         """Executes the given operation
@@ -143,7 +220,11 @@ class CursorWrapper(object):
         This wrapper method around the execute()-method of the cursor is
         mainly needed to re-raise using different exceptions.
         """
-        return self._execute_wrapper(self.cursor.execute, query, args)
+        if isinstance(args, dict):
+            new_args = self._adapt_execute_args_dict(args)
+        else:
+            new_args = self._adapt_execute_args(args)
+        return self._execute_wrapper(self.cursor.execute, query, new_args)
 
     def executemany(self, query, args):
         """Executes the given operation
@@ -168,339 +249,14 @@ class CursorWrapper(object):
         self.close()
 
 
-class DatabaseFeatures(BaseDatabaseFeatures):
-    """Features specific to MySQL
-
-    Microsecond precision is supported since MySQL 5.6.3 and turned on
-    by default.
-    """
-    empty_fetchmany_value = []
-    update_can_self_select = False
-    allows_group_by_pk = True
-    related_fields_match_type = True
-    allow_sliced_subqueries = False
-    has_bulk_insert = True
-    has_select_for_update = True
-    has_select_for_update_nowait = False
-    supports_forward_references = False
-    supports_long_model_names = False
-    supports_binary_field = six.PY2
-    supports_microsecond_precision = False  # toggled in __init__()
-    supports_regex_backreferencing = False
-    supports_date_lookup_using_string = False
-    can_introspect_binary_field = False
-    can_introspect_boolean_field = False
-    supports_timezones = False
-    requires_explicit_null_ordering_when_grouping = True
-    allows_auto_pk_0 = False
-    allows_primary_key_0 = False
-    uses_savepoints = True
-    atomic_transactions = False
-    supports_column_check_constraints = False
-
-    def __init__(self, connection):
-        super(DatabaseFeatures, self).__init__(connection)
-        self.supports_microsecond_precision = self._microseconds_precision()
-
-    def _microseconds_precision(self):
-        if self.connection.mysql_version >= (5, 6, 3):
-            return True
-        return False
-
-    @cached_property
-    def _mysql_storage_engine(self):
-        """Get default storage engine of MySQL
-
-        This method creates a table without ENGINE table option and inspects
-        which engine was used.
-
-        Used by Django tests.
-        """
-        tblname = 'INTROSPECT_TEST'
-
-        droptable = 'DROP TABLE IF EXISTS {table}'.format(table=tblname)
-        with self.connection.cursor() as cursor:
-            cursor.execute(droptable)
-            cursor.execute('CREATE TABLE {table} (X INT)'.format(table=tblname))
-
-            if self.connection.mysql_version >= (5, 0, 0):
-                cursor.execute(
-                    "SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES "
-                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
-                    (self.connection.settings_dict['NAME'], tblname))
-                engine = cursor.fetchone()[0]
-            else:
-                # Very old MySQL servers..
-                cursor.execute("SHOW TABLE STATUS WHERE Name='{table}'".format(
-                    table=tblname))
-                engine = cursor.fetchone()[1]
-            cursor.execute(droptable)
-
-        self._cached_storage_engine = engine
-        return engine
-
-    @cached_property
-    def can_introspect_foreign_keys(self):
-        """Confirm support for introspected foreign keys
-
-        Only the InnoDB storage engine supports Foreigen Key (not taking
-        into account MySQL Cluster here).
-        """
-        return self._mysql_storage_engine == 'InnoDB'
-
-    @cached_property
-    def has_zoneinfo_database(self):
-        """Tests if the time zone definitions are installed
-
-        MySQL accepts full time zones names (eg. Africa/Nairobi) but rejects
-        abbreviations (eg. EAT). When pytz isn't installed and the current
-        time zone is LocalTimezone (the only sensible value in this context),
-        the current time zone name will be an abbreviation. As a consequence,
-        MySQL cannot perform time zone conversions reliably.
-        """
-        # Django 1.6
-        if not HAVE_PYTZ:
-            return False
-
-        with self.connection.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM mysql.time_zone LIMIT 1")
-            return cursor.fetchall() != []
-
-
-class DatabaseOperations(BaseDatabaseOperations):
-    compiler_module = "mysql.connector.django.compiler"
-
-    # MySQL stores positive fields as UNSIGNED ints.
-    if django.VERSION >= (1, 7):
-        integer_field_ranges = dict(BaseDatabaseOperations.integer_field_ranges,
-                                    PositiveSmallIntegerField=(0, 4294967295),
-                                    PositiveIntegerField=(
-                                        0, 18446744073709551615),)
-
-    def date_extract_sql(self, lookup_type, field_name):
-        # http://dev.mysql.com/doc/mysql/en/date-and-time-functions.html
-        if lookup_type == 'week_day':
-            # DAYOFWEEK() returns an integer, 1-7, Sunday=1.
-            # Note: WEEKDAY() returns 0-6, Monday=0.
-            return "DAYOFWEEK({0})".format(field_name)
-        else:
-            return "EXTRACT({0} FROM {1})".format(
-                lookup_type.upper(), field_name)
-
-    def date_trunc_sql(self, lookup_type, field_name):
-        """Returns SQL simulating DATE_TRUNC
-
-        This function uses MySQL functions DATE_FORMAT and CAST to
-        simulate DATE_TRUNC.
-
-        The field_name is returned when lookup_type is not supported.
-        """
-        fields = ['year', 'month', 'day', 'hour', 'minute', 'second']
-        format = ('%Y-', '%m', '-%d', ' %H:', '%i', ':%S')
-        format_def = ('0000-', '01', '-01', ' 00:', '00', ':00')
-        try:
-            i = fields.index(lookup_type) + 1
-        except ValueError:
-            # Wrong lookup type, just return the value from MySQL as-is
-            sql = field_name
-        else:
-            format_str = ''.join([f for f in format[:i]] +
-                                 [f for f in format_def[i:]])
-            sql = "CAST(DATE_FORMAT({0}, '{1}') AS DATETIME)".format(
-                field_name, format_str)
-        return sql
-
-    def datetime_extract_sql(self, lookup_type, field_name, tzname):
-        # Django 1.6
-        if settings.USE_TZ:
-            field_name = "CONVERT_TZ({0}, 'UTC', %s)".format(field_name)
-            params = [tzname]
-        else:
-            params = []
-
-        # http://dev.mysql.com/doc/mysql/en/date-and-time-functions.html
-        if lookup_type == 'week_day':
-            # DAYOFWEEK() returns an integer, 1-7, Sunday=1.
-            # Note: WEEKDAY() returns 0-6, Monday=0.
-            sql = "DAYOFWEEK({0})".format(field_name)
-        else:
-            sql = "EXTRACT({0} FROM {1})".format(lookup_type.upper(),
-                                                 field_name)
-        return sql, params
-
-    def datetime_trunc_sql(self, lookup_type, field_name, tzname):
-        # Django 1.6
-        if settings.USE_TZ:
-            field_name = "CONVERT_TZ({0}, 'UTC', %s)".format(field_name)
-            params = [tzname]
-        else:
-            params = []
-        fields = ['year', 'month', 'day', 'hour', 'minute', 'second']
-        format_ = ('%Y-', '%m', '-%d', ' %H:', '%i', ':%S')
-        format_def = ('0000-', '01', '-01', ' 00:', '00', ':00')
-        try:
-            i = fields.index(lookup_type) + 1
-        except ValueError:
-            sql = field_name
-        else:
-            format_str = ''.join([f for f in format_[:i]] +
-                                 [f for f in format_def[i:]])
-            sql = "CAST(DATE_FORMAT({0}, '{1}') AS DATETIME)".format(
-                field_name, format_str)
-        return sql, params
-
-    def date_interval_sql(self, sql, connector, timedelta):
-        """Returns SQL for calculating date/time intervals
-        """
-        fmt = (
-            "({sql} {connector} INTERVAL '{days} "
-            "0:0:{secs}:{msecs}' DAY_MICROSECOND)"
-        )
-        return fmt.format(
-            sql=sql,
-            connector=connector,
-            days=timedelta.days,
-            secs=timedelta.seconds,
-            msecs=timedelta.microseconds
-        )
-
-    def drop_foreignkey_sql(self):
-        return "DROP FOREIGN KEY"
-
-    def force_no_ordering(self):
-        """
-        "ORDER BY NULL" prevents MySQL from implicitly ordering by grouped
-        columns. If no ordering would otherwise be applied, we don't want any
-        implicit sorting going on.
-        """
-        return ["NULL"]
-
-    def fulltext_search_sql(self, field_name):
-        return 'MATCH ({0}) AGAINST (%s IN BOOLEAN MODE)'.format(field_name)
-
-    def last_executed_query(self, cursor, sql, params):
-        return cursor.statement
-
-    def no_limit_value(self):
-        # 2**64 - 1, as recommended by the MySQL documentation
-        return 18446744073709551615
-
-    def quote_name(self, name):
-        if name.startswith("`") and name.endswith("`"):
-            return name  # Quoting once is enough.
-        return "`{0}`".format(name)
-
-    def random_function_sql(self):
-        return 'RAND()'
-
-    def sql_flush(self, style, tables, sequences, allow_cascade=False):
-        if tables:
-            sql = ['SET FOREIGN_KEY_CHECKS = 0;']
-            for table in tables:
-                sql.append('{keyword} {table};'.format(
-                    keyword=style.SQL_KEYWORD('TRUNCATE'),
-                    table=style.SQL_FIELD(self.quote_name(table))))
-            sql.append('SET FOREIGN_KEY_CHECKS = 1;')
-            sql.extend(self.sequence_reset_by_name_sql(style, sequences))
-            return sql
-        else:
-            return []
-
-    def sequence_reset_by_name_sql(self, style, sequences):
-        # Truncate already resets the AUTO_INCREMENT field from
-        # MySQL version 5.0.13 onwards. Refs #16961.
-        res = []
-        if self.connection.mysql_version < (5, 0, 13):
-            fmt = "{alter} {table} {{tablename}} {auto_inc} {field};".format(
-                alter=style.SQL_KEYWORD('ALTER'),
-                table=style.SQL_KEYWORD('TABLE'),
-                auto_inc=style.SQL_KEYWORD('AUTO_INCREMENT'),
-                field=style.SQL_FIELD('= 1')
-            )
-            for sequence in sequences:
-                tablename = style.SQL_TABLE(self.quote_name(sequence['table']))
-                res.append(fmt.format(tablename=tablename))
-            return res
-        return res
-
-    def validate_autopk_value(self, value):
-        # MySQLism: zero in AUTO_INCREMENT field does not work. Refs #17653.
-        if value == 0:
-            raise ValueError('The database backend does not accept 0 as a '
-                             'value for AutoField.')
-        return value
-
-    def value_to_db_datetime(self, value):
-        if value is None:
-            return None
-        # MySQL doesn't support tz-aware times
-        if timezone.is_aware(value):
-            if settings.USE_TZ:
-                value = value.astimezone(timezone.utc).replace(tzinfo=None)
-            else:
-                raise ValueError(
-                    "MySQL backend does not support timezone-aware times."
-                )
-
-        return self.connection.converter.to_mysql(value)
-
-    def value_to_db_time(self, value):
-        if value is None:
-            return None
-
-        # MySQL doesn't support tz-aware times
-        if timezone.is_aware(value):
-            raise ValueError("MySQL backend does not support timezone-aware "
-                             "times.")
-
-        return self.connection.converter.to_mysql(value)
-
-    def year_lookup_bounds(self, value):
-        # Again, no microseconds
-        first = '{0}-01-01 00:00:00'
-        second = '{0}-12-31 23:59:59.999999'
-        return [first.format(value), second.format(value)]
-
-    def year_lookup_bounds_for_datetime_field(self, value):
-        # Django 1.6
-        # Again, no microseconds
-        first, second = super(DatabaseOperations,
-            self).year_lookup_bounds_for_datetime_field(value)
-        if self.connection.mysql_version >= (5, 6, 4):
-            return [first.replace(microsecond=0), second]
-        else:
-            return [first.replace(microsecond=0),
-                second.replace(microsecond=0)]
-
-    def max_name_length(self):
-        return 64
-
-    def bulk_insert_sql(self, fields, num_values):
-        items_sql = "({0})".format(", ".join(["%s"] * len(fields)))
-        return "VALUES " + ", ".join([items_sql] * num_values)
-
-    def savepoint_create_sql(self, sid):
-        return "SAVEPOINT {0}".format(sid)
-
-    def savepoint_commit_sql(self, sid):
-        return "RELEASE SAVEPOINT {0}".format(sid)
-
-    def savepoint_rollback_sql(self, sid):
-        return "ROLLBACK TO SAVEPOINT {0}".format(sid)
-
-    def combine_expression(self, connector, sub_expressions):
-        """
-        MySQL requires special cases for ^ operators in query expressions
-        """
-        if connector == '^':
-            return 'POW(%s)' % ','.join(sub_expressions)
-        return super(DatabaseOperations, self).combine_expression(
-            connector, sub_expressions)
-
-
 class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = 'mysql'
+    # This dictionary maps Field objects to their associated MySQL column
+    # types, as strings. Column-type strings can contain format strings; they'll
+    # be interpolated against the values of Field.__dict__ before being output.
+    # If a column type is set to None, it won't be included in the output.
 
+    # Moved from DatabaseCreation class in Django v1.8
     _data_types = {
         'AutoField': 'integer AUTO_INCREMENT',
         'BinaryField': 'longblob',
@@ -532,7 +288,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
     @cached_property
     def data_types(self):
         if self.features.supports_microsecond_precision:
-            return dict(self._data_types, DateTimeField='datetime(6)', TimeField='time(6)')
+            return dict(self._data_types, DateTimeField='datetime(6)',
+                        TimeField='time(6)')
         else:
             return self._data_types
 
@@ -553,12 +310,40 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'iendswith': 'LIKE %s',
     }
 
+    # The patterns below are used to generate SQL pattern lookup clauses when
+    # the right-hand side of the lookup isn't a raw string (it might be an
+    # expression or the result of a bilateral transformation).
+    # In those cases, special characters for LIKE operators (e.g. \, *, _)
+    # should be escaped on database side.
+    #
+    # Note: we use str.format() here for readability as '%' is used as a
+    # wildcard for the LIKE operator.
+    pattern_esc = (r"REPLACE(REPLACE(REPLACE({}, '\\', '\\\\'),"
+                   r" '%%', '\%%'), '_', '\_')")
+    pattern_ops = {
+        'contains': "LIKE BINARY CONCAT('%%', {}, '%%')",
+        'icontains': "LIKE CONCAT('%%', {}, '%%')",
+        'startswith': "LIKE BINARY CONCAT({}, '%%')",
+        'istartswith': "LIKE CONCAT({}, '%%')",
+        'endswith': "LIKE BINARY CONCAT('%%', {})",
+        'iendswith': "LIKE CONCAT('%%', {})",
+    }
+
+    SchemaEditorClass = DatabaseSchemaEditor
     Database = mysql.connector
 
     def __init__(self, *args, **kwargs):
         super(DatabaseWrapper, self).__init__(*args, **kwargs)
 
-        self.converter = DjangoMySQLConverter()
+        try:
+            self._use_pure = self.settings_dict['OPTIONS']['use_pure']
+        except KeyError:
+            self._use_pure = True
+
+        if not self.use_pure:
+            self.converter = DjangoCMySQLConverter()
+        else:
+            self.converter = DjangoMySQLConverter()
         self.ops = DatabaseOperations(self)
         self.features = DatabaseFeatures(self)
         self.client = DatabaseClient(self)
@@ -576,7 +361,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         kwargs = {
             'charset': 'utf8',
             'use_unicode': True,
-            'buffered': True,
+            'buffered': False,
+            'consume_results': True,
         }
 
         settings_dict = self.settings_dict
@@ -611,8 +397,11 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     def get_new_connection(self, conn_params):
         # Django 1.6
+        if not self.use_pure:
+            conn_params['converter_class'] = DjangoCMySQLConverter
+        else:
+            conn_params['converter_class'] = DjangoMySQLConverter
         cnx = mysql.connector.connect(**conn_params)
-        cnx.set_converter_class(DjangoMySQLConverter)
 
         return cnx
 
@@ -772,3 +561,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         temp_conn.close()
 
         return server_version
+
+    @property
+    def use_pure(self):
+        return not HAVE_CEXT or self._use_pure
