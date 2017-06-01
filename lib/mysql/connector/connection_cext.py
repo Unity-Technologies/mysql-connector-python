@@ -1,5 +1,5 @@
 # MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2014, 2016, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -54,6 +54,7 @@ else:
     HAVE_CMYSQL = True
 # pylint: enable=F0401,C0413
 
+
 class CMySQLConnection(MySQLConnectionAbstract):
 
     """Class initiating a MySQL Connection using Connector/C"""
@@ -64,7 +65,6 @@ class CMySQLConnection(MySQLConnectionAbstract):
             raise RuntimeError(
                 "MySQL Connector/Python C Extension not available")
         self._cmysql = None
-        self._connection_timeout = 2
         self._columns = []
         self.converter = None
         super(CMySQLConnection, self).__init__(**kwargs)
@@ -139,12 +139,11 @@ class CMySQLConnection(MySQLConnectionAbstract):
 
     def _open_connection(self):
         charset_name = CharacterSet.get_info(self._charset_id)[0]
-
-        self._cmysql = _mysql_connector.MySQL(
+        self._cmysql = _mysql_connector.MySQL(  # pylint: disable=E1101
             buffered=self._buffered,
             raw=self._raw,
             charset_name=charset_name,
-            connection_timeout=int(self._connection_timeout or 10),
+            connection_timeout=(self._connection_timeout or 0),
             use_unicode=self._use_unicode,
             auth_plugin=self._auth_plugin)
 
@@ -260,6 +259,7 @@ class CMySQLConnection(MySQLConnectionAbstract):
             raise AttributeError("count should be 1 or higher, or None")
 
         counter = 0
+        # pylint: disable=R0204
         try:
             row = self._cmysql.fetch_row()
             while row:
@@ -278,7 +278,7 @@ class CMySQLConnection(MySQLConnectionAbstract):
             self.free_result()
             raise errors.get_mysql_exception(msg=exc.msg, errno=exc.errno,
                                              sqlstate=exc.sqlstate)
-
+        # pylint: enable=R0204
         return rows
 
     def get_row(self, binary=False, columns=None):
