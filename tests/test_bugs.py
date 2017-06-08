@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2009, 2016, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2009, 2017, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -44,6 +44,7 @@ from threading import Thread
 import traceback
 import time
 import unittest
+import pickle
 
 import tests
 from tests import foreach_cnx, cnx_config
@@ -52,6 +53,7 @@ from mysql.connector import (connection, cursor, conversion, protocol,
                              errors, constants, pooling)
 from mysql.connector.optionfiles import read_option_files
 import mysql.connector
+import cpy_distutils
 
 try:
     from mysql.connector.connection_cext import CMySQLConnection
@@ -62,6 +64,8 @@ except ImportError:
 ERR_NO_CEXT = "C Extension not available"
 
 
+@unittest.skipIf(tests.MYSQL_VERSION == (5, 7, 4),
+                 "Bug328998 not tested with MySQL version 5.7.4")
 class Bug328998Tests(tests.MySQLConnectorTests):
     """Tests where connection timeout has been set"""
 
@@ -2381,6 +2385,7 @@ class BugOra16217765(tests.MySQLConnectorTests):
         user = self.users['sha256user']
         config['user'] = user['username']
         config['password'] = user['password']
+        config['auth_plugin'] = user['auth_plugin']
         self.assertRaises(errors.InterfaceError, connection.MySQLConnection,
                           **config)
         if CMySQLConnection:
@@ -4196,3 +4201,200 @@ class BugOra21530841(tests.MySQLConnectorTests):
         cur.execute(query)
         cur.fetchone()
         cur.close()
+
+
+class BugOra25397650(tests.MySQLConnectorTests):
+    """BUG#25397650: CERTIFICATE VALIDITY NOT VERIFIED 
+    """
+    def setUp(self):
+        self.config = tests.get_mysql_config()
+        self.config = tests.get_mysql_config()
+        self.config.update({
+            'ssl_ca': os.path.abspath(
+                os.path.join(tests.SSL_DIR, 'tests_CA_cert.pem')),
+            'ssl_cert': os.path.abspath(
+                os.path.join(tests.SSL_DIR, 'tests_client_cert.pem')),
+            'ssl_key': os.path.abspath(
+                os.path.join(tests.SSL_DIR, 'tests_client_key.pem')),
+        })
+        self.mysql_server = tests.MYSQL_SERVERS[0]
+        self._use_expired_cert()
+
+    def tearDown(self):
+        self._use_original_cert()
+        self._ensure_up()
+
+    def _ensure_up(self):
+        # Start the MySQL server again
+        if not self.mysql_server.check_running():
+            self.mysql_server.start()
+
+            if not self.mysql_server.wait_up():
+                self.fail("Failed restarting MySQL server after test")
+
+    def _use_original_cert(self):
+        self.mysql_server.stop()
+        self.mysql_server.wait_down()
+
+        self.mysql_server.start()
+        self.mysql_server.wait_up()
+        time.sleep(2)
+
+    def _use_expired_cert(self):
+        self.mysql_server.stop()
+        self.mysql_server.wait_down()
+
+        cert = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_expired_server_cert.pem'))
+        key = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_expired_server_key.pem'))
+        if os.name == 'nt':
+            cert = os.path.normpath(cert)
+            cert = cert.replace('\\', '\\\\')
+            key = os.path.normpath(key)
+            key = key.replace('\\', '\\\\')
+        self.mysql_server.start(ssl_cert=cert, ssl_key=key)
+        self.mysql_server.wait_up()
+        time.sleep(2)
+
+    def test_pure_verify_server_certifcate(self):
+        self.config["use_pure"] = True
+        self.config['ssl_verify_cert'] = True
+        self.assertRaises(errors.InterfaceError,
+            mysql.connector.connect, **self.config)
+        self.config['ssl_verify_cert'] = False
+        mysql.connector.connect(**self.config)
+
+    def test_cext_verify_server_certifcate(self):
+        self.config["use_pure"] = False
+        self.config['ssl_verify_cert'] = True
+        self.assertRaises(errors.InterfaceError,
+            mysql.connector.connect, **self.config)
+        self.config['ssl_verify_cert'] = False
+        mysql.connector.connect(**self.config)
+
+
+class BugOra25589496(tests.MySQLConnectorTests):
+    """BUG#25589496: COMMITS RELATED TO "BUG22529828" BROKE BINARY DATA
+    HANDLING FOR PYTHON 2.7
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        self.cnx = connection.MySQLConnection(**config)
+        self.tbl = "Bug25589496"
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+
+    def tearDown(self):
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cnx.close()
+
+    def test_insert_binary(self):
+        table = """
+        CREATE TABLE {0} (
+            `id` int(10) unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            `section` VARCHAR(50) NOT NULL,
+            `pickled` LONGBLOB NOT NULL
+        )
+        """.format(self.tbl)
+        cursor = self.cnx.cursor()
+        cursor.execute(table)
+
+        pickled = pickle.dumps({'a': 'b'}, pickle.HIGHEST_PROTOCOL)
+        add_row_q = "INSERT INTO {0} (section, pickled) " \
+                    "VALUES (%(section)s, %(pickled)s)".format(self.tbl)
+
+        new_row = cursor.execute(add_row_q, {'section': 'foo',
+                                             'pickled': pickled})
+        self.cnx.commit()
+        self.assertEqual(1, cursor.lastrowid)
+        cursor.close()
+
+
+class BugOra25383644(tests.MySQLConnectorTests):
+    """BUG#25383644: LOST SERVER CONNECTION LEAKS POOLED CONNECTIONS
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        config["pool_size"] = 3
+        self.cnxpool = pooling.MySQLConnectionPool(**config)
+        self.mysql_server = tests.MYSQL_SERVERS[0]
+
+    def test_pool_exhaustion(self):
+        sql = "SELECT * FROM dummy"
+
+        i = 4
+        while i > 0:
+            cnx = self.cnxpool.get_connection()
+            cur = cnx.cursor()
+            try:
+                self.mysql_server.stop()
+                self.mysql_server.wait_down()
+                cur.execute(sql)
+            except mysql.connector.errors.OperationalError:
+                try:
+                    cur.close()
+                    cnx.close()
+                except mysql.connector.errors.OperationalError:
+                    pass
+            finally:
+                i -= 1
+                if not self.mysql_server.check_running():
+                    self.mysql_server.start()
+                    self.mysql_server.wait_up()
+
+
+class BugOra25558885(tests.MySQLConnectorTests):
+    """BUG#25558885: ERROR 2013 (LOST CONNECTION TO MYSQL SERVER) USING C
+    EXTENSIONS
+    """
+    def setUp(self):
+        pass
+
+    def _long_query(self, config, cursor_class):
+        db_conn = mysql.connector.connect(**config)
+        cur = db_conn.cursor(cursor_class=cursor_class)
+        cur.execute("select sleep(15)")
+        cur.close()
+        db_conn.disconnect()
+
+    def test_cext_cnx(self):
+        config = tests.get_mysql_config()
+        config["use_pure"] = False
+        del config["connection_timeout"]
+        cursor_class = mysql.connector.cursor_cext.CMySQLCursorBufferedRaw
+        self._long_query(config, cursor_class)
+
+    def test_pure_cnx(self):
+        config = tests.get_mysql_config()
+        config["use_pure"] = True
+        del config["connection_timeout"]
+        cursor_class = mysql.connector.cursor.MySQLCursorBufferedRaw
+        self._long_query(config, cursor_class)
+
+
+class BugOra20736339(tests.MySQLConnectorTests):
+    """BUG#20736339: C EXTENSION FAILS TO COMPILE IF MYSQL_CONFIG RETURN MORE
+    THAN ONE INCLUDE DIR
+    """
+    def test_parse_mysql_config(self):
+        options = ['cflags', 'include', 'libs', 'libs_r', 'plugindir', 'version']
+        includes = ["/mysql/include", "/mysql/another_include"]
+        config = """
+        -I/mysql/include -fabi-version=2 -fno-omit-frame-pointer
+        -I{0}
+        -L/mysql/lib -lmysqlclient -lpthread -lm -lrt -lssl -lcrypto -ldl
+        -L/mysql/lib -lmysqlclient -lpthread -lm -lrt -lssl -lcrypto -ldl
+        /mysql/lib/plugin
+        5.7.17
+        """
+
+        info = cpy_distutils.parse_mysql_config_info(options,
+            config.strip().format(includes[0]))
+        self.assertEqual(1, len(info["include"]))
+        self.assertEqual(includes[0], info["include"][0])
+
+        info = cpy_distutils.parse_mysql_config_info(options,
+            config.strip().format(" -I".join(includes)))
+        self.assertEqual(2, len(info["include"]))
+        self.assertEqual(includes[0], info["include"][0])
+        self.assertEqual(includes[1], info["include"][1])

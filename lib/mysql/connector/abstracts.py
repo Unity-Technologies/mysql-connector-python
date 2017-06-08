@@ -1,5 +1,5 @@
 # MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2014, 2016, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
 
 # MySQL Connector/Python is licensed under the terms of the GPLv2
 # <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
@@ -62,7 +62,7 @@ class MySQLConnectionAbstract(object):
         self._use_unicode = True
         self._get_warnings = False
         self._raise_on_warnings = False
-        self._connection_timeout = None
+        self._connection_timeout = DEFAULT_CONFIGURATION["connect_timeout"]
         self._buffered = False
         self._unread_result = False
         self._have_next_result = False
@@ -230,6 +230,13 @@ class MySQLConnectionAbstract(object):
                 self._consume_results = True
         except KeyError:
             self._consume_results = False
+
+        # Configure auth_plugin
+        try:
+            self._auth_plugin = config['auth_plugin']
+            del config['auth_plugin']
+        except KeyError:
+            self._auth_plugin = ''
 
         # Configure character set and collation
         if 'charset' in config or 'collation' in config:
